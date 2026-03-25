@@ -54,6 +54,7 @@ CHAT_HTML = """<!DOCTYPE html>
   .eval-dim .dim-fill { height: 100%; border-radius: 8px; transition: width 0.5s; }
   .eval-dim .dim-score { width: 36px; text-align: right; font-weight: 600; font-size: 12px; }
   .eval-dim .dim-reason { font-size: 11px; color: #777; margin-left: 138px; margin-bottom: 4px; }
+  .eval-dim .dim-desc { font-size: 11px; color: #5c85d6; margin-left: 138px; margin-bottom: 2px; font-style: italic; }
   .eval-expected { margin-top: 8px; padding: 8px; background: #e8f5e9; border-radius: 6px; font-size: 11px; color: #2e7d32; }
   .eval-expected b { color: #1b5e20; }
   .detail-section { margin-top: 6px; margin-bottom: 4px; }
@@ -272,6 +273,14 @@ CHAT_HTML = """<!DOCTYPE html>
       fluency: 'Fluency', intent_resolution: 'Intent Resolution',
       response_completeness: 'Resp. Completeness'
     };
+    const dimDescriptions = {
+      relevance: 'How pertinent the response is to the user query and context.',
+      coherence: 'How logically structured and internally consistent the response is.',
+      groundedness: 'Whether the response claims are supported by factual knowledge.',
+      fluency: 'The naturalness, readability, and grammatical correctness of the response.',
+      intent_resolution: 'How well the response addresses and resolves the user intent.',
+      response_completeness: 'How thoroughly the response covers all aspects of the query.'
+    };
 
     for (const dim of dimOrder) {
       if (!(dim in scores)) continue;
@@ -281,14 +290,18 @@ CHAT_HTML = """<!DOCTYPE html>
       const label = score + '/5';
       const color = barColor(score, max);
       const name = dimLabels[dim] || dim;
+      const desc = dimDescriptions[dim] || '';
 
       html += '<div class="eval-dim">';
-      html += '  <span class="dim-name">' + name + '</span>';
+      html += '  <span class="dim-name" title="' + desc + '">' + name + '</span>';
       html += '  <div class="dim-bar"><div class="dim-fill" style="width:' + pct + '%;background:' + color + '"></div></div>';
       html += '  <span class="dim-score" style="color:' + color + '">' + label + '</span>';
       html += '</div>';
+      if (desc) {
+        html += '<div class="eval-dim"><span class="dim-desc">' + esc(desc) + '</span></div>';
+      }
       if (reasons[dim]) {
-        html += '<div class="eval-dim"><span class="dim-reason">' + esc(reasons[dim]) + '</span></div>';
+        html += '<div class="eval-dim"><span class="dim-reason">Score rationale: ' + esc(reasons[dim]) + '</span></div>';
       }
     }
 
