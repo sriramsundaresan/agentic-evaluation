@@ -729,5 +729,200 @@ def evaluate_model_only(query: str) -> dict:
     }
 
 
+def run_model_evaluation(
+    test_cases_path: str = "data/test_cases.jsonl",
+    output_dir: str = "results",
+) -> dict:
+    """
+    Run a batch model-only evaluation pipeline (no tools):
+    1. Load test cases
+    2. Run the LLM on each query WITHOUT tools, collect responses
+    3. Save model outputs to a JSONL for the Foundry SDK
+    4. Run Foundry SDK evaluate() with built-in evaluators
+    5. Aggregate and save a comparison report
+
+    This mirrors run_foundry_evaluation() but uses the bare LLM with no
+    tool access, so scores can be compared directly against the agent results.
+    """
+    print("=" * 70)
+    print("  MODEL-ONLY EVALUATION (No Tools)")
+    print("=" * 70)
+
+    # Step 1: Load test data
+    print(f"\n[1/5] Loading test cases from {test_cases_path}...")
+    test_cases = load_test_cases(test_cases_path)
+    print(f"       Loaded {len(test_cases)} test cases")
+
+    # Step 2: Run model (no tools) on each test case
+    model_config = build_model_config()
+    print(f"\n[2/5] Running model (no tools) on test cases...")
+    print(f"       Model: {os.environ['AZURE_OPENAI_DEPLOYMENT_NAME']}")
+
+    collected = []
+    for i, tc in enumerate(test_cases, 1):
+        query = tc["query"]
+        expected_behavior = tc.get("expected_behavior", "")
+        print(f"\n  --- Test Case {i}/{len(test_cases)} ---")
+        print(f"  Query: {query[:80]}...")
+
+        start = time.time()
+        model_result = run_model_only(query)
+        elapsed = time.time() - start
+        print(f"  Model responded in {elapsed:.1f}s (no tools)")
+
+        collected.append({
+            "query": query,
+            "response": model_result["response"],
+            "expected_behavior": expected_behavior,
+            "model_latency_sec": round(elapsed, 2),
+        })
+
+    # Step 3: Save model outputs as JSONL for Foundry SDK
+    print(f"\n[3/5] Preparing data for Foundry SDK evaluators...")
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    eval_data_path = os.path.join(output_dir, "model_eval_input.jsonl")
+    with open(eval_data_path, "w", encoding="utf-8") as f:
+        for row in collected:
+            f.write(json.dumps({
+                "query": row["query"],
+                "response": row["response"],
+                "context": (
+                    "No tools or external data sources were used. "
+                    "The model answered from its training knowledge only."
+                ),
+            }, ensure_ascii=False) + "\n")
+
+    # Step 4: Run Foundry SDK evaluate()
+    print(f"\n[4/5] Running Foundry SDK evaluators on model-only responses...")
+    start_time = time.time()
+
+    credential = DefaultAzureCredential()
+
+    MODEL_EVALUATORS = ["relevance", "coherence", "groundedness", "fluency", "intent_resolution"]
+
+    eval_result = evaluate(
+        data=eval_data_path,
+        evaluators={
+            "relevance": RelevanceEvaluator(model_config=model_config, credential=credential),
+            "coherence": CoherenceEvaluator(model_config=model_config, credential=credential),
+            "groundedness": GroundednessEvaluator(model_config=model_config, credential=credential),
+            "fluency": FluencyEvaluator(model_config=model_config, credential=credential),
+            "intent_resolution": IntentResolutionEvaluator(model_config=model_config, credential=credential),
+        },
+        output_path=os.path.join(output_dir, "model_eval_output"),
+    )
+
+    eval_time = time.time() - start_time
+    print(f"       Foundry SDK evaluation completed in {eval_time:.1f}s")
+
+    # Step 5: Build report
+    print(f"\n[5/5] Generating model evaluation report...")
+    report = build_model_report(eval_result, collected, MODEL_EVALUATORS, output_dir)
+
+    return report
+
+
+def build_model_report(
+    eval_result: dict,
+    collected: list[dict],
+    evaluator_names: list[str],
+    output_dir: str,
+) -> dict:
+    """Build a structured report from model-only Foundry SDK evaluation results."""
+    metrics = eval_result.get("metrics", {})
+    rows = eval_result.get("rows", [])
+
+    # Extract dimension averages
+    dimension_scores = {}
+    for ev in evaluator_names:
+        score_key = f"{ev}.{ev}"
+        if score_key in metrics and isinstance(metrics[score_key], (int, float)):
+            dimension_scores[ev] = round(metrics[score_key], 2)
+
+    # Per-row details
+    detailed_results = []
+    for i, (row, model_data) in enumerate(zip(rows, collected)):
+        row_scores = {}
+        row_reasons = {}
+        for ev in evaluator_names:
+            score_key = f"outputs.{ev}.{ev}"
+            reason_key = f"outputs.{ev}.{ev}_reason"
+            if score_key in row and isinstance(row[score_key], (int, float)):
+                row_scores[ev] = row[score_key]
+            if reason_key in row and isinstance(row[reason_key], str):
+                row_reasons[ev] = row[reason_key]
+
+        avg_score = round(
+            sum(row_scores.values()) / len(row_scores), 2
+        ) if row_scores else 0
+
+        detailed_results.append({
+            "test_case_index": i + 1,
+            "query": model_data["query"],
+            "expected_behavior": model_data["expected_behavior"],
+            "model_response": model_data["response"],
+            "foundry_scores": row_scores,
+            "foundry_reasons": row_reasons,
+            "average_score": avg_score,
+            "pass": avg_score >= 4.0,
+            "model_latency_sec": model_data["model_latency_sec"],
+        })
+
+    total = len(detailed_results)
+    passed = sum(1 for r in detailed_results if r["pass"])
+    overall_avg = round(sum(r["average_score"] for r in detailed_results) / total, 2) if total else 0
+
+    report = {
+        "evaluation_id": datetime.now().strftime("model-eval-%Y%m%d-%H%M%S"),
+        "evaluation_type": "Model-Only — No Tools (Azure AI Foundry SDK)",
+        "timestamp": datetime.now().isoformat(),
+        "total_test_cases": total,
+        "passed": passed,
+        "failed": total - passed,
+        "pass_rate": f"{passed}/{total} ({100 * passed / total:.0f}%)" if total else "0/0",
+        "overall_average_score": overall_avg,
+        "dimension_averages": dimension_scores,
+        "detailed_results": detailed_results,
+    }
+
+    # Save report
+    report_path = os.path.join(output_dir, f"{report['evaluation_id']}.json")
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+
+    # Print summary
+    print("\n" + "=" * 70)
+    print("  MODEL-ONLY EVALUATION REPORT — No Tools")
+    print("=" * 70)
+    print(f"  Evaluation ID:    {report['evaluation_id']}")
+    print(f"  Test Cases:       {total}")
+    print(f"  Passed:           {passed} | Failed: {total - passed}")
+    print(f"  Pass Rate:        {report['pass_rate']}")
+    print(f"  Overall Average:  {overall_avg}/5")
+    print()
+    print("  Foundry SDK Dimension Averages (model without tools):")
+    print(f"  {'Dimension':<25} {'Avg Score':>10} {'Scale':>8}")
+    print(f"  {'-'*25} {'-'*10} {'-'*8}")
+    for dim, avg in sorted(dimension_scores.items()):
+        print(f"  {dim:<25} {avg:>10} {'1-5':>8}")
+
+    print()
+    for r in detailed_results:
+        status = "PASS" if r["pass"] else "FAIL"
+        print(f"  TC {r['test_case_index']}: {status} (avg {r['average_score']}/5) — {r['query'][:55]}...")
+        for dim, score in r["foundry_scores"].items():
+            icon = "✓" if score >= 4 else "✗"
+            print(f"    {icon} {dim}: {score}/5")
+
+    print(f"\n  Report saved to: {report_path}")
+    print("=" * 70)
+
+    return report
+
+
 if __name__ == "__main__":
-    report = run_foundry_evaluation()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "model":
+        report = run_model_evaluation()
+    else:
+        report = run_foundry_evaluation()
