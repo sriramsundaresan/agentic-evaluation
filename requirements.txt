@@ -11,6 +11,9 @@ pandas>=2.0.0
 # Azure AI Foundry SDK evaluators
 azure-ai-evaluation>=1.0.0
 
+# Testing
+pytest>=8.0.0
+
 # Microsoft Agent Framework (for later Foundry deployment)
 # agent-framework-azure-ai==1.0.0rc3
 # agent-framework-core==1.0.0rc3
